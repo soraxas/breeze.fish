@@ -123,141 +123,101 @@ function __breeze_light_helper_get_bracket_num
     echo "$spaces_needed"'['$argv[1]']'
 end
 
-function __breeze_light_get_filelist -d "retrieve list of files from this repo"
-    # get file status from git
-    # in git status --porcelain, the first two character is for
-    # file status, and the third is a space. This is consistent,
-    # so we can simply use substring rather than complex regex
-    # set -l file_names (git status --porcelain | string sub --start 4)
-    # Going to use git status short instead, as it supports relative path
-    set -l file_names (git status --short | string sub --start 4)
+function __breeze_light_collect -d "run git status ONCE; fill the display lines and the numbered file list"
+    # Both `breeze status` (display) and `breeze add N` (numbering) are derived
+    # from this single `git status` call, so the numbers always agree and we
+    # never pay for two git processes (each exec can be expensive).
+    #
+    # Sets globals:
+    #   __breeze_light_lines     raw (coloured) git status lines
+    #   __breeze_light_line_idx  per line: file number, or 0 if not a file line
+    #   __breeze_light_files     file paths, numbered in display order
+    set -g __breeze_light_lines
+    set -g __breeze_light_line_idx
+    set -g __breeze_light_files
+
+    # --long: ignore a user's `status.short = true`
+    # LC_ALL=C: fixed English labels/headers, so the parsing below is stable
+    set -l raw (LC_ALL=C command git -c color.status=always status --long)
     or return $status
-    # if a file is renamed, it will be shown as XXXXX -> YYYYYY
-    # add the two to file list as well.
-    set -l i 1
-    set -l num_files (count $file_names)
-    while test $i -le $num_files
-        # try to split
-        set -l try_split (string split -- ' -> ' $file_names[$i])
-        if test (count $try_split) -eq 2
-            # append both to end of list
-            set -e file_names[$i] # remove this non-file
-            set -a file_names $try_split[1]
-            set -a file_names $try_split[2]
+
+    set -l section
+    for line in $raw
+        set -l clean (string replace -ra -- '\x1B\[[0-?]*[ -/]*[@-~]' '' $line)
+        set -l idx 0
+
+        if string match -q -- \t'*' $clean
+            # a file line (always tab-indented in the long format)
+            set -l path (string sub --start 2 -- $clean)
+            if test "$section" != untracked
+                #   modified:   foo          renamed:    a -> b
+                #   both modified:   foo     modified:   sub (new commits)
+                set path (string replace -r -- '^(new file|modified|deleted|renamed|copied|typechange|unknown|unmerged|both deleted|added by us|deleted by them|added by them|deleted by us|both added|both modified):\s+' '' $path)
+                set path (string replace -r -- ' \((?:new commits|modified content|untracked content)(?:, (?:new commits|modified content|untracked content))*\)$' '' $path)
+                # rename/copy: number the new path
+                set path (string split -m1 -- ' -> ' $path)[-1]
+            end
+            # a path listed in several sections keeps its first number
+            if not set idx (contains -i -- $path $__breeze_light_files)
+                set -a __breeze_light_files $path
+                set idx (count $__breeze_light_files)
+            end
+        else if string match -q -- 'Untracked files:' $clean; or string match -q -- 'Ignored files:' $clean
+            set section untracked
+        else if string match -qr -- '^\S.*:$' $clean
+            # Changes to be committed: / Changes not staged for commit: / Unmerged paths:
+            set section tracked
         end
-        set i (math "$i + 1")
+
+        set -a __breeze_light_line_idx $idx
+        set -a __breeze_light_lines $line
     end
-    printf '%s\n' $file_names
 end
 
+
+function __breeze_light_get_filelist -d "retrieve list of files from this repo"
+    __breeze_light_collect
+    or return $status
+    # (printf with no arguments would still print one empty line)
+    set -q __breeze_light_files[1]
+    and printf '%s\n' $__breeze_light_files
+    return 0
+end
+
+
 function __breeze_light_show_status -d "add numeric to git status"
-    # if true, place [n] in front of the filename
-    # else, place in front of the entire status.
+    __breeze_light_collect
+    or return $status
 
-    set -l file_names (__breeze_light_get_filelist)
-    set -l num_files (count $file_names)
+    set -l num_files (count $__breeze_light_files)
+    set -l n 0
+    for line in $__breeze_light_lines
+        set n (math $n + 1)
+        set -l idx $__breeze_light_line_idx[$n]
 
-    # prepare a list of file names without surrounding double quotes
-    set -l file_names_wo_quote
-    for file in $file_names
-        # remove surrounding double quotes if exists
-        set -l file_wo_quote (string replace -r -- '^["](.*)["]$' '$1' $file)
-        and set -l file $file_wo_quote
-        set -a file_names_wo_quote $file
-    end
-
-    for line in (git -c color.status=always status)
-        # A line that contains information about a gitfile will either be:
-        #                 foo            <- for untracked
-        #   modified:     bar
-        #    deleted:     hello (new commits)
-        #
-        # i.e., three main variant
-        # echo ---------------
-        if string match -q -r '\e\[[0-9;]+m' $line
-
-            # This line has some sort of escaped color code in it.
-            # This must be a line that indicates a file within it
-
-            # loop through the list of file and find exact match
-
-            ################################################
-            # (1) Method: looping to find highest matched file (old method)
-            # # keep track of the highest matched fname
-            # set -l max_match_length 0
-            set -l idx -1
-            # for i in (seq 1 (count $file_names_wo_quote))
-            #     set -l file $file_names_wo_quote[$i]
-            #     # find a file that has the maximum matched characters
-            #     if string match -q "*$file*" "$line"
-            #         set -l _tmp_length (string length -- $file)
-            #         if test $_tmp_length -gt $max_match_length
-            #             set max_match_length $_tmp_length
-            #             set idx $i
-            #         end
-            #     end
-            # end
-            ################################################
-            # (2) Method: using hashmap-like approach (to speed up)
-            # This no longer use glob-search, but with exact match
-            # we will do this by first splitting the line into line parts
-            # and process it by progressively re-joining the parts
-            # (that's because the prefix always are at the start of the line)
-            # e.g. modified is at the start, whereas untracked files has no prefix
-
-            # the follow line remove all ANSI escape color code
-            # https://stackoverflow.com/questions/14693701/how-can-i-remove-the-ansi-escape-sequences-from-a-string-in-python
-            set -l clean_line (string replace -ra -- '\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])' '' (string trim -- $line))
-            # trim potential prefix (e.g. modified:)
-            # or potential suffix (e.g. (new commits) for submodules)
-            set clean_line (string replace -ra -- '(^\s*modified:\s)|(\s\(new commits\)\s*$)' '' $clean_line)
-
-            set -l line_parts -- (string split -- ' ' $clean_line)
-            set -l line_parts_n (count $line_parts)
-            set -l i 1
-            while test $i -le $line_parts_n
-                set -l -- sub_line "$line_parts[$i..$line_parts_n]"
-                if set __idx (contains -i -- "$sub_line" $file_names_wo_quote) # `set` won't modify $status, so this succeeds if `contains` succeeds
-                    # find a matching file, most likely
-                    set idx $__idx
-                    break
-                end
-                set i (math $i + 1)
-            end
-
-            if test $idx -le 0
-                # couldn't find a matching file?
-                # print the original line
-                echo $line
-                continue
-            end
-
-            ################################################
-
-            if test "$__fish_breeze_show_num_before_fname" = true
-                # This is to place number right before the filename
-                string replace -f "$file" "[$idx] $file" $line
-
-            else
-                # This is to place number right after the first ANSI escape color code
-
-                # this finds the index of the starting color code, in the format of:
-                # i j   ->  where i is the starting idx of the token and j is the length
-                if set -l start_color_code (string match --index -r '\e\[[0-9;]+m' $line | string split ' ')
-
-                    # line prefix (i.e. whitespace + colorcode)
-                    set -l prefix (string sub --length (math "$start_color_code[1] + $start_color_code[2] - 1") $line)
-                    # line main (i.e. file status + the suffix bits)
-                    set -l suffix (string sub --start (math "$start_color_code[1] + $start_color_code[2]") $line)
-
-                    printf $prefix"%s " (__breeze_light_helper_get_bracket_num $idx $num_files)
-                    printf $suffix"\n"
-                end
-            end
-
-        else
+        if test "$idx" -le 0
             # this line is not a file status line
-            echo $line
+            printf '%s\n' $line
+            continue
+        end
+
+        if test "$__fish_breeze_show_num_before_fname" = true
+            # place number right before the filename
+            set -l file $__breeze_light_files[$idx]
+            string replace -- "$file" "[$idx] $file" $line
+            continue
+        end
+
+        # place number right after the first ANSI colour code
+        # (string match --index gives "start length" of the token)
+        if set -l start_color_code (string match --index -r '\e\[[0-9;]+m' $line | string split ' ')
+            # line prefix (i.e. whitespace + colorcode)
+            set -l prefix (string sub --length (math "$start_color_code[1] + $start_color_code[2] - 1") -- $line)
+            # line main (i.e. file status + the suffix bits)
+            set -l suffix (string sub --start (math "$start_color_code[1] + $start_color_code[2]") -- $line)
+            printf '%s%s %s\n' $prefix (__breeze_light_helper_get_bracket_num $idx $num_files) $suffix
+        else
+            printf '%s %s\n' (__breeze_light_helper_get_bracket_num $idx $num_files) $line
         end
     end
 end
