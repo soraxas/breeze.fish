@@ -1,7 +1,6 @@
-
 set -l __breeze_light_supported_numeric_subcommands \
     diff stash checkout add mv rm restore reset log
-set -l __breeze_light_supported_numeric_subcommands (string join0 $__breeze_light_supported_numeric_subcommands | sort -z | string split0)
+set -l __breeze_light_supported_numeric_subcommands (path sort -- $__breeze_light_supported_numeric_subcommands)
 
 set -l __breeze_light_subcommands \
     "status:Git status with numeric number inserted" \
@@ -115,7 +114,6 @@ function breeze \
 
 end
 
-
 function __breeze_light_helper_get_bracket_num
     # This helps to align the bracket numbers
     # by prefixing spaces
@@ -124,7 +122,6 @@ function __breeze_light_helper_get_bracket_num
     set -l spaces_needed (string repeat ' ' -n (math "$max_num_length - $num_length"))
     echo "$spaces_needed"'['$argv[1]']'
 end
-
 
 function __breeze_light_get_filelist -d "retrieve list of files from this repo"
     # get file status from git
@@ -152,8 +149,6 @@ function __breeze_light_get_filelist -d "retrieve list of files from this repo"
     end
     printf '%s\n' $file_names
 end
-
-
 
 function __breeze_light_show_status -d "add numeric to git status"
     # if true, place [n] in front of the filename
@@ -219,13 +214,15 @@ function __breeze_light_show_status -d "add numeric to git status"
 
             set -l line_parts -- (string split -- ' ' $clean_line)
             set -l line_parts_n (count $line_parts)
-            for i in (seq 1 $line_parts_n)
+            set -l i 1
+            while test $i -le $line_parts_n
                 set -l -- sub_line "$line_parts[$i..$line_parts_n]"
                 if set __idx (contains -i -- "$sub_line" $file_names_wo_quote) # `set` won't modify $status, so this succeeds if `contains` succeeds
                     # find a matching file, most likely
                     set idx $__idx
                     break
                 end
+                set i (math $i + 1)
             end
 
             if test $idx -le 0
@@ -264,7 +261,6 @@ function __breeze_light_show_status -d "add numeric to git status"
         end
     end
 end
-
 
 function __breeze_light_parse_user_input -d "parse user's numeric input to breeze"
     # allow using comma to separate numbers, so we will first iterate all args and
@@ -306,7 +302,7 @@ function __breeze_light_parse_user_input -d "parse user's numeric input to breez
         # quotes for git status --short), remove them, as fish echo do
         # not need to be nazi quotes.
         if string match -qr -- '^"[^"]*"$' "$argv[1]"
-            set argv[1] string sub --start 2 --length (math (string length -- $argv[1])"-2") $argv[1]
+            set argv[1] (string sub --start 2 --length (math (string length -- $argv[1])"-2") -- $argv[1])
         end
         # if there are space(s) within the arg, add surrounding quotes
         if string match -qr -- '^[^\'"].*[ ].*[^\'"]$' "$argv[1]"
@@ -321,8 +317,10 @@ function __breeze_light_parse_user_input -d "parse user's numeric input to breez
         set -l end_n $argv[2]
         set -e argv[1]
         set -e argv[1]
-        for i in (seq $start_n $end_n)
+        set -l i $start_n
+        while test $i -le $end_n
             __breeze_light_echo_file_with_quote $argv[$i]
+            set i (math $i + 1)
         end
     end
     # set -l num_files $argv[1]
